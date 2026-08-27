@@ -3,7 +3,7 @@ HDBIDE  = hdblba.rom hdbchs.rom
 HDBDW   = hdbdw3cc1.rom hdbdw3cc2.rom hdbdw3cc3.rom \
 	hdbdw3bck.rom hdbdw3bc3.rom hdbdw3bckt.rom hdbdw3bc3t.rom hdbdw3jc3.rom hdbdw3jc2.rom \
 	hdbdw3arduino.rom hdbdw3sy.rom hdbdw3s3.rom hdbdw3dm.rom hdbdw3d3.rom hdbdw3dg.rom \
-	hdbdw3ln.rom hdbdw3l3.rom hdbdw3bckwifi.rom
+	hdbdw3ln.rom hdbdw3l3.rom hdbdw3bckwifi.rom hdbonerom.rom
 HDBDW4  = hdbdw4cc3.rom hdbdw4cc2.rom
 HDBSDC  = hdbsdc.rom
 HDBROM  = $(HDBSDC) $(HDBSCSI) $(HDBIDE) $(HDBDW)
@@ -27,10 +27,26 @@ ALLOBJS         = preload postload $(HDBROM) $(HDBBIN) $(HDBCAS)
 HISPEED         = $(HDBDW4) $(HDBBIN4) $(HDBCAS4)
 
 #AS		= mamou -r -q
-AS		= lwasm -r --pragma=condundefzero,nodollarlocal,noindex0tonone
+AS		= lwasm -r --pragma=condundefzero,nodollarlocal,noindex0tonone --map=hdbdos.map
 MERGE		= cat
 MAKEWAV		= makewav -r -c
 CECB		= cecb
+
+# lwasm's raw (-r) output writer has a code-generation bug that shows up on
+# this file: for a big chunk of the tail of a plain %.rom build (in testing,
+# roughly the last 1.2K of an 8K image, e.g. $D930-$DFAA for hdbdw3cc2), the
+# bytes actually written to the raw binary don't match what the assembler
+# itself resolved -- e.g. a live branch instruction lands on stale bytes left
+# over from an earlier assembly pass instead of its real target code. This
+# is silent (the file assembles and links fine) and was hanging/crashing
+# hdbdos in XRoar. lwasm's listing output doesn't have this problem (checked
+# against the DECB (-b) output format, which is generated through a
+# different, correct path), so fixrom8k.py rebuilds the ROM image from the
+# listing's own byte dump instead of trusting the raw file, using the
+# MAGICDG/ZZLAST symbols as the start/end of real code and padding the rest
+# with $39 out to a full 8K. -b (DECB .bin) builds carry their own
+# header/size and use the correct writer already, so leave them alone.
+FIXROM8K	= ./fixrom8k.py
 
 all: $(ALLOBJS)
 experimental: all $(HISPEED)
@@ -45,7 +61,9 @@ postload: postload.asm
 	$(MERGE) $+ > $@
 
 %.rom : hdbdos.asm
-	$(AS) $(EQUATES) hdbdos.asm -o$@ $(FLAGS)
+	$(AS) $(EQUATES) hdbdos.asm -o$@ --symbol-dump=$@.sym --list=$@.lst $(FLAGS)
+	$(if $(findstring -b,$(FLAGS)), , $(FIXROM8K) $@ $@.lst $@.sym)
+	@rm -f $@.sym $@.lst
 
 %.wav : %.bin
 	$(MAKEWAV) -o$@ -n$(LABEL) $<
@@ -94,6 +112,21 @@ hdbdw4cc3.wav: LABEL = HDBDW4C3
 # DW4 CoCo 2
 hdbdw4cc2.rom: FLAGS = -DDW -DLevel=1 -DDW4
 hdbdw4cc2.wav: LABEL = HDBDW4C2
+
+# DW3 One ROM - DriveWire over One ROM's drivewire plugin (RP2350 UART1
+# bridge to a real DriveWire server), instead of any CoCo serial port.
+# See plugins/user/drivewire in the One ROM repository.
+# Level=1 (CoCo1/2); use Level=2 for a CoCo3-specific build instead.
+hdbonerom.rom: FLAGS = -DDW -DLevel=1 -DONEROM
+
+# DW3 One ROM bring-up test - DWWrite sends its knock, then loops forever
+# sending an incrementing 0x00-0xFF pattern.  Pairs with the drivewire
+# plugin's TEST_PATTERN=1 build.  Not part of `all` - build explicitly with
+# `make hdbonerom_test.rom`.  Not in HDBROM/HDBDW4, so it needs its own
+# EQUATES assignment rather than picking one up from that group rule.
+hdbonerom_test.rom: FLAGS = -DDW -DLevel=1 -DONEROM -DONEROM_TEST_PATTERN
+hdbonerom_test.rom: EQUATES = ../cocoroms/ecb_equates.asm
+hdbonerom_test.rom: ../cocoroms/ecb_equates.asm
 
 # DW3 CoCo 3
 hdbdw3cc3.rom: FLAGS = -DDW -DLevel=2

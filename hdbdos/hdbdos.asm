@@ -4211,10 +4211,18 @@ c2@            addb      ,x+
                bne       c2@
                leax      -256,x
                pshs      d
+               IFDEF     ONEROM
+               lbsr      DWWrite             ; ONEROM's DWWrite is out of bsr range
+               ELSE
                bsr       DWWrite
+               ENDC
                ldy       #2
                leax      ,s
+               IFDEF     ONEROM
+               lbsr      DWWrite             ; ONEROM's DWWrite is out of bsr range
+               ELSE
                bsr       DWWrite
+               ENDC
                ldy       #$0001
                leax      ,s
                lbsr      DWRead
@@ -4236,7 +4244,11 @@ OKEX           puls      cc,pc
 
 * Get 256 bytes of sector data
 HREAD          bsr       SEND
+               IFDEF     ONEROM
+               lbsr      DWRead              ; ONEROM's DWRead is out of bsr range
+               ELSE
                bsr       DWRead
+               ENDC
                bcs       BADEX               branch if framing error
                bne       BADEX               branch if timeout
 * Send two byte checksum
@@ -4245,10 +4257,18 @@ HREAD          bsr       SEND
                ldy       #1
                pshs      y,x
                leay      1,y
+               IFDEF     ONEROM
+               lbsr      DWWrite             ; ONEROM's DWWrite is out of bsr range
+               ELSE
                bsr       DWWrite
+               ENDC
 * Get error code byte
                puls      x,y
+               IFDEF     ONEROM
+               lbsr      DWRead              ; ONEROM's DWRead is out of bsr range
+               ELSE
                bsr       DWRead
+               ENDC
                puls      d
                bcs       BADEX               branch if framing error
                bne       BADEX               branch if timeout
@@ -4262,13 +4282,18 @@ HREAD          bsr       SEND
                sta       VCMD
                bra       HREAD               and try getting sector again
 
+               IFDEF     ONEROM
+               use       dwonewrite.asm
+               use       dwoneread.asm
+               ELSE
                IFDEF     DW4
                use       dw4write.asm
                use       dw4read.asm
-               ELSE      
+               ELSE
                use       dwwrite.asm
                use       dwread.asm
-               ENDC      
+               ENDC
+               ENDC
 
                setdp     $00
 
