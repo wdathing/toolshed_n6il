@@ -13,8 +13,8 @@
 *
 * Entry:
 *    X  = storage address for incoming data
-*    Y  = number of bytes requested (1-256; 256 is a normal 16-bit 256 - see
-*         dwonewrite.asm)
+*    Y  = number of bytes requested (0-65535, matching dw.h's dwread() -
+*         see dwonewrite.asm's identical note on its own Y)
 *
 * Exit:
 *    CC = Z set on success, cleared on timeout (this transport has no
@@ -28,11 +28,12 @@
 *    All others clobbered
 *
 * Wire protocol (must exactly match plugins/user/drivewire):
-*    "!DWRECV!" knock, then one count byte (0 means 256).  For each
-*    requested byte: poll the status address ($C100) until it reads $FF,
-*    then read the data address ($C101) to collect the byte.  The plugin
-*    does not prepare the next byte until it has seen this code read the
-*    data address, so there is no need to acknowledge that separately.
+*    "!DWRECV!" knock, then two count bytes (16-bit, high byte first - see
+*    dwonewrite.asm's identical encoding).  For each requested byte: poll
+*    the status address ($C100) until it reads $FF, then read the data
+*    address ($C101) to collect the byte.  The plugin does not prepare the
+*    next byte until it has seen this code read the data address, so there
+*    is no need to acknowledge that separately.
 
 DWRead      pshs      cc                 ; saved for its IRQ mask bits only -
             pshs      u                  ; the returned CC comes from tsta
@@ -78,12 +79,13 @@ DWRCODE     ldu       #$C100             ; signalling page - see
             ldb       #'!
             lda       b,u
 
-            cmpy      #256
-            bne       dwrcnt1@
-            clrb                         ; wire encoding: 256 -> byte 0
-            bra       dwrcnt2@
-dwrcnt1@    tfr       y,d
-dwrcnt2@    lda       b,u                ; send count byte
+            tfr       y,d                ; D = count (A=high byte, B=low)
+            pshs      b                  ; save low byte across the high
+                                          ; byte's send below
+            tfr       a,b
+            lda       b,u                ; send high byte of count
+            puls      b                  ; restore low byte
+            lda       b,u                ; send low byte of count
 
             ldd       #0                 ; running checksum
 dwrloop@    pshs      d                  ; the poll below clobbers A, so the

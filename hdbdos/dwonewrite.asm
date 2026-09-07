@@ -9,9 +9,9 @@
 *
 * Entry:
 *    X  = starting address of data to send
-*    Y  = number of bytes to send (1-256; 256 is a normal 16-bit 256, not
-*         a special case on entry - only the wire's count byte, which is
-*         8 bits, needs a 256->0 mapping)
+*    Y  = number of bytes to send (0-65535, matching dw.h's dwwrite() -
+*         sent on the wire as a plain 16-bit count, no special-casing
+*         needed since it is never narrower than the values it carries)
 *
 * Exit:
 *    X  = address of last byte sent + 1
@@ -39,10 +39,11 @@
 *    a bounded poll-with-retry against $C200 (a byte address in a separate
 *    page from the $C100-$C1FF count/data range below - see DWWACKTIMEOUT's
 *    own comment) for the plugin's ack, resending the whole knock if it
-*    doesn't arrive in time.  Then one count byte (0 means 256), then N
-*    further reads whose address low byte is the data byte.  The value
-*    actually read back from the ROM at each of these count/data addresses
-*    is discarded - only the address matters; the ack poll is the one read
+*    doesn't arrive in time.  Then two count bytes (16-bit, high byte
+*    first - see dw.h's dwwrite()/dwread(), both 0-65535), then N further
+*    reads whose address low byte is the data byte.  The value actually
+*    read back from the ROM at each of these count/data addresses is
+*    discarded - only the address matters; the ack poll is the one read
 *    in this whole routine where the value read back is what's checked.
 
 * Poll-with-retry budget for the knock's ack (see DWWCODE below).  The
@@ -157,12 +158,13 @@ dwwacked@   puls      d                  ; discard the saved retry budget -
                                           ; exhausted path above
 dwwgiveup@  ldu       #$C100             ; back to the signalling page for
                                           ; the count/data bytes below
-            cmpy      #256
-            bne       dwwcnt1@
-            clrb                         ; wire encoding: 256 -> byte 0
-            bra       dwwcnt2@
-dwwcnt1@    tfr       y,d
-dwwcnt2@    lda       b,u                ; send count byte
+            tfr       y,d                ; D = count (A=high byte, B=low)
+            pshs      b                  ; save low byte across the high
+                                          ; byte's send below
+            tfr       a,b
+            lda       b,u                ; send high byte of count
+            puls      b                  ; restore low byte
+            lda       b,u                ; send low byte of count
 
 dwwloop@    lda       ,x+                ; fetch next data byte
             tfr       a,b

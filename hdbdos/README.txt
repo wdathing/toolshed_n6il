@@ -17,3 +17,21 @@ The difference between _cc1 and _cc2 flavours is only the baud rate.
 
 See the Makefile for more hints about different flavours.
 
+ONEROM build (hdbonerom.rom) bridges DriveWire over One ROM's RP2350
+UART1 plugin instead of a serial port - see plugins/user/drivewire in
+the One ROM repository for the device side of this protocol.
+
+Build with: make hdbonerom.rom
+
+Editing dwonewrite.asm or dwoneread.asm alone will not trigger a
+rebuild, since the %.rom rule only tracks hdbdos.asm's own mtime even
+though hdbdos.asm pulls those files in via `use`.  Force it with
+`make -B hdbonerom.rom`, or touch hdbdos.asm first.
+
+Never trust a bare `lwasm -r` invocation's output file directly for
+this build - always go through `make` (or run fixrom8k.py afterward
+yourself).  lwasm's raw (-r) writer has a code-generation bug that
+corrupts roughly the last 1.2KB of this specific 8K image; fixrom8k.py
+reconstructs the real ROM from the .lst/.sym files instead of trusting
+the raw output, and the Makefile's rule already runs it automatically
+after every assemble.
