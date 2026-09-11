@@ -3921,26 +3921,27 @@ FPGAWiFiLpEnd
                jsr       >LD7F3               delay while server changes baud rate
                ENDC      
 
-*               pshs      cc                  then push CC on stack
-*               orcc      #IntMasks
-*               ldx       #PIA1Base           $FF20
-*               clr       1,x                 clear CD
-*               lda       #$FE
-*               sta       ,x
-*               lda       #$36
-*               sta       1,x
-*               lda       ,x
-* Send INIT to the server
-*               lda       #OP_INIT
-*               IFGT      Level-1
-*               clr       $FFD9
-*               ENDC      
-*               pshs      a
-*               leax      ,s
-*               ldy       #0001
-*               lbsr      DWWrite
-*               puls      a,cc                Carry is clear on pull
-               ENDC      
+* Send OP_TIME to the server and read back its 6-byte reply, once here at
+* boot before any real read/write - a throwaway exercise of a full write-
+* then-read DriveWire session (unlike a bare OP_INIT, which only writes: the
+* server's op_init() handler sends nothing back at all, so it never touches
+* DWRead - see fujinet-firmware's drivewire.cpp). Confirmed on real
+* hardware: without something like this, the very first real read session
+* after a cold boot (but never a retry without power-cycling the plugin)
+* comes back with a wrong checksum. DBUF0 is reused as the destination for
+* the 6 reply bytes purely as scratch space - nothing has claimed the disk
+* buffer yet this early in boot, and the date/time values themselves are
+* discarded.
+               lda       #OP_TIME
+               pshs      a
+               leax      ,s
+               ldy       #1
+               lbsr      DWWrite
+               leas      1,s
+               ldx       #DBUF0
+               ldy       #6
+               lbsr      DWRead
+               ENDC
 
                IFDEF     ARDUINO
 * setup PIA PORTA (read)
@@ -5210,6 +5211,9 @@ SIGNON         fcc       "HDB-DOS "
                fcc       "4-N-1"
                ENDC      
                IFDEF     DW
+               IFDEF     ONEROM
+               fcc       "ONE ROM "
+               ELSE
                IFDEF     ARDUINO
                fcc       "DW3 ARDUINO"
                ELSE
@@ -5229,6 +5233,7 @@ SIGNON         fcc       "HDB-DOS "
                fcc       "SY6551 COCO "
                ELSE
                fcc       "DW3 COCO "
+               ENDC
                ENDC
                ENDC
                ENDC
