@@ -55,14 +55,22 @@
 *    and patches its stack copy's leave address, exactly as DWWrite does -
 *    see dwonewrite.asm's "CoCo 3" note for why and how.
 
-* How long DWRead waits for any one byte before giving up, in units of 256
-* passes of the 23-cycle poll loop below: 212 x 256 x 23 = ~1.25M cycles,
-* 1.4s at the CoCo's normal 0.89MHz and 0.7s at double speed - the same idle
-* timeout as the bit-banger DWRead (dwread.asm), which HDB-DOS's callers are
-* written around.  Without one, a request the server never answered - an
-* ESP32 still booting at power-on lost it - left the CoCo polling forever,
-* and HDB-DOS's own boot-probe retry never got a failure to retry on.
-DWRTIMEOUT  equ       212
+* How long DWRead waits for any one byte with the status byte unchanged
+* before giving up, in passes of the 33-cycle poll loop below: 37880 x 33 =
+* ~1.25M cycles, 1.4s at the CoCo's normal 0.89MHz and 0.7s at double speed
+* - the same idle timeout as the bit-banger DWRead (dwread.asm), which
+* HDB-DOS's callers are written around.  Without one, a request the server
+* never answered - an ESP32 still booting at power-on lost it - left the
+* CoCo polling forever, and HDB-DOS's own boot-probe retry never got a
+* failure to retry on.
+*
+* "Unchanged" is the point: while the plugin is waiting on a slow reply, or
+* receiving a cartridge push, it flips the status byte between $03 and $01
+* as a heartbeat, and every change restarts the count.  So the CoCo waits as
+* long as the plugin is visibly working and gives up ~1.4s after it isn't.
+* A fixed timeout couldn't do both: at double speed a CoCo 3 gave up at 0.7s
+* on a MOUNT IMAGE whose reply came ~1.0s later, behind the push it triggers.
+DWRTIMEOUT  equ       37880
 
 DWRead      pshs      cc                 ; saved for its IRQ mask bits only -
             pshs      u                  ; the returned CC comes from tsta
@@ -129,14 +137,15 @@ DWRCODE     sta       >$FFDE             ; cartridge in - see dwonewrite.asm
                                           ; so the first byte's is T0
 
 * B carries the previous byte's toggle into each pass - see "Wire protocol"
-* above for the handshake.  A and the byte at 0,s count down DWRTIMEOUT
-* while polling.  No blank lines from here to the BNE DWRLOOP below - lwasm
-* starts a new local-label scope at each one.
+* above for the handshake.  While polling, X is the DWRTIMEOUT count (the
+* buffer pointer waits on the stack) and A the last status byte seen.  No
+* blank lines from here to the BNE DWRLOOP below - lwasm starts a new
+* local-label scope at each one.
 DWRLOOP     sta       >$FFDE             ; cartridge in (already in on the
                                           ; first pass)
-            lda       #DWRTIMEOUT
-            pshs      a                  ; outer timeout count, at 0,s
-            clra                         ; inner count - 256 passes
+            pshs      x                  ; buffer pointer, freeing X
+            ldx       #DWRTIMEOUT
+            lda       ,u                 ; status as first seen
 dwrpoll@    tst       b,u                ; re-acknowledge the previous byte
                                           ; ($C100+B) - recovers an
                                           ; acknowledgement the plugin missed
@@ -144,16 +153,19 @@ dwrpoll@    tst       b,u                ; re-acknowledge the previous byte
             cmpb      ,u                 ; status ($C100) showing it yet?
             beq       dwrgot@
             eorb      #1                 ; no - back to the previous toggle
-            deca
+            cmpa      ,u                 ; changed since last seen? (the
+            beq       dwrsame@           ; plugin's heartbeat)
+            lda       ,u                 ; yes - note it, and restart the
+            ldx       #DWRTIMEOUT        ; timeout
+dwrsame@    leax      -1,x
             bne       dwrpoll@
-            dec       ,s
-            bne       dwrpoll@
-            leas      1,s                ; timed out - drop the count,
-DWRTOLEAVE  sta       >$FFDE             ; leave - patched like DWRLEAVE
+            leas      2,s                ; timed out - drop the buffer
+DWRTOLEAVE  sta       >$FFDE             ; pointer; leave - patched like
+                                          ; DWRLEAVE
             puls      x,y                ; drop start and count,
             lda       #1                 ; and fail: status nonzero is Z
             rts                          ; clear in DWRead's TSTA - timeout
-dwrgot@     leas      1,s                ; drop the timeout count
+dwrgot@     puls      x                  ; the buffer pointer back
             lda       $01,u              ; the data byte ($C101)
             tst       b,u                ; acknowledge it ($C100+B) - a read
                                           ; that leaves A alone
