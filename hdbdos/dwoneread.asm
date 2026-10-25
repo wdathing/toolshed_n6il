@@ -29,11 +29,40 @@
 *
 * Wire protocol (must exactly match plugins/user/drivewire):
 *    "!DWRECV!" knock, then two count bytes (16-bit, high byte first - see
-*    dwonewrite.asm's identical encoding).  For each requested byte: poll
-*    the status address ($C100) until it reads $FF, then read the data
-*    address ($C101) to collect the byte.  The plugin does not prepare the
-*    next byte until it has seen this code read the data address, so there
-*    is no need to acknowledge that separately.
+*    dwonewrite.asm's identical encoding).  Each byte then carries a toggle,
+*    T0 = $02 for the first, alternating with T1 = $03.  For byte N with
+*    toggle T: wait until the status address ($C100) reads T, read the data
+*    address ($C101), then acknowledge by reading $C100+T ($C102 or $C103).
+*    The plugin publishes byte N+1 only once it sees that acknowledgement.
+*
+*    Why a toggle rather than a ready flag: with a flag, this loop could get
+*    back to polling the status before the plugin had cleared it, and take
+*    the same byte twice - which a double-speed CoCo 3 did, desyncing every
+*    session.  Waiting for the value to change cannot double-collect, however
+*    fast this loop runs.  Why the separate acknowledgement address, re-read
+*    on every pass of the next byte's poll: the plugin can miss a single bus
+*    read, and a missed one-shot acknowledgement would leave both sides
+*    waiting forever.  Re-reading the previous byte's address while polling
+*    for the next makes a missed acknowledgement cost one more pass instead.
+*
+*    The toggles being the acknowledgement addresses' own low bytes is what
+*    lets one register do both jobs below (EORB #1 flips it, LDA B,U reads
+*    its address), and the plugin depends on those exact values.  Until the
+*    plugin publishes the first byte, $C100 still holds this ROM's own byte
+*    there, which must not be T0.
+*
+* CoCo 3: switches the cartridge in and out around its signalling reads,
+*    and patches its stack copy's leave address, exactly as DWWrite does -
+*    see dwonewrite.asm's "CoCo 3" note for why and how.
+
+* How long DWRead waits for any one byte before giving up, in units of 256
+* passes of the 23-cycle poll loop below: 212 x 256 x 23 = ~1.25M cycles,
+* 1.4s at the CoCo's normal 0.89MHz and 0.7s at double speed - the same idle
+* timeout as the bit-banger DWRead (dwread.asm), which HDB-DOS's callers are
+* written around.  Without one, a request the server never answered - an
+* ESP32 still booting at power-on lost it - left the CoCo polling forever,
+* and HDB-DOS's own boot-probe retry never got a failure to retry on.
+DWRTIMEOUT  equ       212
 
 DWRead      pshs      cc                 ; saved for its IRQ mask bits only -
             pshs      u                  ; the returned CC comes from tsta
@@ -45,20 +74,27 @@ cpydwr@     lda       ,-u
             pshs      a
             cmpu      #DWRCODE
             bne       cpydwr@
-            jsr       ,s
+            ldb       >$FFFC             ; CoCo 3? - see dwonewrite.asm
+            cmpb      #$FE
+            bne       dwrnoc3b@
+            lda       #$DF               ; leave = $FFDF (RAM mode); +2 is
+            sta       DWRLEAVE+2-DWRCODE,s ; the low byte of each operand
+            sta       DWRTOLEAVE+2-DWRCODE,s
+dwrnoc3b@   jsr       ,s
             leas      DWRCODELEN,s
             puls      u
             puls      cc                 ; restores the original IRQ mask
-                                          ; bits; A (the blob's status,
-                                          ; always 0 - see below) is
-                                          ; untouched by this
+                                          ; bits; A (the blob's status: 0,
+                                          ; or 1 on a DWRTIMEOUT timeout)
+                                          ; is untouched by this
             tsta                         ; set Z from the status byte
             andcc     #$FE               ; clear C - no framing error here
             rts
 
 * Position-independent body - copied onto the stack and run from there.
 * Entered with X/Y as DWRead's own entry parameters, U free to use.
-DWRCODE     ldu       #$C100             ; signalling page - see
+DWRCODE     sta       >$FFDE             ; cartridge in - see dwonewrite.asm
+            ldu       #$C100             ; signalling page - see
                                           ; dwonewrite.asm and
                                           ; plugins/user/drivewire
 
@@ -87,26 +123,57 @@ DWRCODE     ldu       #$C100             ; signalling page - see
             puls      b                  ; restore low byte
             lda       b,u                ; send low byte of count
 
-            ldd       #0                 ; running checksum
-dwrloop@    pshs      d                  ; the poll below clobbers A, so the
-                                          ; checksum can't stay in D across it
-dwrpoll@    lda       $00,u              ; poll status ($C100)
-            cmpa      #$FF
+            pshs      x,y                ; buffer start and count, for the
+                                          ; checksum pass below
+            ldb       #$03               ; B = previous byte's toggle (T1),
+                                          ; so the first byte's is T0
+
+* B carries the previous byte's toggle into each pass - see "Wire protocol"
+* above for the handshake.  A and the byte at 0,s count down DWRTIMEOUT
+* while polling.  No blank lines from here to the BNE DWRLOOP below - lwasm
+* starts a new local-label scope at each one.
+DWRLOOP     sta       >$FFDE             ; cartridge in (already in on the
+                                          ; first pass)
+            lda       #DWRTIMEOUT
+            pshs      a                  ; outer timeout count, at 0,s
+            clra                         ; inner count - 256 passes
+dwrpoll@    tst       b,u                ; re-acknowledge the previous byte
+                                          ; ($C100+B) - recovers an
+                                          ; acknowledgement the plugin missed
+            eorb      #1                 ; B = this byte's toggle
+            cmpb      ,u                 ; status ($C100) showing it yet?
+            beq       dwrgot@
+            eorb      #1                 ; no - back to the previous toggle
+            deca
             bne       dwrpoll@
-            lda       $01,u              ; single read of the data byte
-                                          ; ($C101) - the plugin treats this
-                                          ; read as "byte collected" and
-                                          ; will not serve the next one
-                                          ; until it sees it, so this must
-                                          ; not be read a second time
+            dec       ,s
+            bne       dwrpoll@
+            leas      1,s                ; timed out - drop the count,
+DWRTOLEAVE  sta       >$FFDE             ; leave - patched like DWRLEAVE
+            puls      x,y                ; drop start and count,
+            lda       #1                 ; and fail: status nonzero is Z
+            rts                          ; clear in DWRead's TSTA - timeout
+dwrgot@     leas      1,s                ; drop the timeout count
+            lda       $01,u              ; the data byte ($C101)
+            tst       b,u                ; acknowledge it ($C100+B) - a read
+                                          ; that leaves A alone
+DWRLEAVE    sta       >$FFDE             ; leave - patched to $FFDF on a
+                                          ; CoCo 3, so the buffer access
+                                          ; below sees RAM; A is unchanged
             sta       ,x+                ; store it, advance X
-            puls      d                  ; restore the checksum
-            addb      -1,x               ; checksum += the byte just stored
-                                          ; (a RAM read, not a second ROM
-                                          ; read of the data address)
+            leay      -1,y
+            bne       DWRLOOP
+
+* Checksum pass, over the buffer just filled - kept out of the loop above
+* so D is free for the toggle there.  Already in RAM mode (DWRLEAVE), so
+* the buffer can be anywhere.  Ends with X past the last byte, as the loop
+* above always left it.
+            puls      x,y                ; X = buffer start, Y = count
+            ldd       #0                 ; running checksum
+dwrsum@     addb      ,x+
             adca      #0
             leay      -1,y
-            bne       dwrloop@
+            bne       dwrsum@
 
             tfr       d,y                ; Y = checksum
             clra                         ; status = success (also sets Z,

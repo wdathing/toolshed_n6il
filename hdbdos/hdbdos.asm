@@ -3810,7 +3810,22 @@ DEFID          fcb       0
 * OBJECT CODE STARTS HERE
 ****************************************
 
-HDINIT         ldx       #SIGNON-1           Point to sign-on
+HDINIT         equ       *
+               IFDEF     ONEROM
+* CoCo 3 only: the boot code leaves INIT0 at $CE (32K internal ROM), which
+* hides the cartridge even in ROM mode, so DriveWire could not reach One
+* ROM until BASIC next wrote it.  $CC is the value BASIC itself settles on
+* (coco3.asm's IM.TEXT and L8C2E): same mode, ROM map 16K internal/16K
+* external.  See dwonewrite.asm's "CoCo 3" note for why DriveWire never
+* writes INIT0 itself.
+               lda       >$FFFC              MSB of NMI vector
+               cmpa      #$FE                coco 3 uses FExx page
+               bne       HDINITC2
+               lda       #$CC
+               sta       >$FF90              INIT0
+HDINITC2       equ       *
+               ENDC
+               ldx       #SIGNON-1           Point to sign-on
                lbsr      PRINT2              Print it
 
                ldd       #(9*256)+0          Write 9 bytes of 0...

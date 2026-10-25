@@ -31,7 +31,42 @@
 *    RAM (invisible to the plugin's ROM address monitor) or one of the
 *    deliberate reads below.  DWWCODE relies on nothing but PC-relative
 *    branches and immediate operands, so a byte-for-byte copy runs
-*    correctly from any address - no fixups are needed.
+*    correctly from any address - no fixups are needed, apart from the
+*    deliberate CoCo 3 patch described next.
+*
+* CoCo 3:
+*    The CoCo 3's reset code copies this ROM's first 8K into RAM and then
+*    runs everything in all-RAM mode (coco3.asm, from SC0F6), so a read of
+*    $C100 returns the RAM copy and never reaches the cartridge bus - the
+*    plugin would see nothing.  So every run of signalling reads is
+*    bracketed: a store to $FFDE puts the SAM in ROM mode (cartridge
+*    visible) first, and a store to the "leave" address after.  Only the
+*    store's address matters to the SAM - the value stored is irrelevant.
+*    Running from the stack is what makes this safe: the copy sits below
+*    $8000, which ROM mode does not remap.  The caller's buffer can be
+*    anywhere, $8000-$FEFF included, so it is only ever touched with the
+*    SAM back in RAM mode - hence the per-byte switching in the data loop
+*    rather than one switch around the whole transfer.
+*
+*    ROM mode only shows the cartridge at $C000 with INIT0's ROM-map bits
+*    (MC1:MC0) at 00 (16K internal, 16K external).  This code never touches
+*    INIT0 ($FF90): it is write-only, and reading it returns bus noise (126
+*    on a real CoCo 3 straight after BASIC wrote $4C), so a save-and-restore
+*    here writes junk into it - which once turned the GIME's IRQ/FIRQ on and
+*    wrecked every non-CoCo-compatible screen.  It relies instead on MC1:MC0
+*    already being 00, which is what every Super Extended BASIC video mode
+*    writes (coco3.asm's IM.TEXT, SE03B, SE044, IM.GRAPH, SE079) and what
+*    fujinet-config's CoCo 3 screen writes too.  The one exception is the
+*    boot code's own $CE, which hdbdos.asm's HDINIT replaces with BASIC's
+*    $CC at cold start.  A program that sets 32K internal ROM itself sees
+*    DriveWire time out, rather than anything being corrupted.
+*
+*    The leave address is $FFDE as assembled - a no-op, since $FFDE is
+*    already the CoCo 2's state while this code runs - and DWWrite patches
+*    the stack copy's low byte to $DF on a CoCo 3 only, so the CoCo 2 path
+*    executes exactly the bus accesses it always did.  CoCo 3 detection is
+*    the one hdbdos.asm's SENDY already uses: the CoCo 3's interrupt
+*    vectors point into page $FE.
 *
 * Wire protocol (must exactly match plugins/user/drivewire):
 *    "!DWSEND!" knock (8 bytes, low byte of the address IS the value - see
@@ -59,20 +94,31 @@ DWWACKRETRIES equ      8
 
 DWWrite     pshs      u,d,cc
             orcc      #$50               ; mask interrupts - an interleaved
-                                          ; ISR could desync the sequence
+                                          ; ISR could desync the sequence,
+                                          ; and on a CoCo 3 must not run
+                                          ; while ROM mode is switched in
             ldu       #DWWCODEEND
 cpydww@     lda       ,-u
             pshs      a
             cmpu      #DWWCODE
             bne       cpydww@
-            jsr       ,s
+            ldb       >$FFFC             ; CoCo 3? - see "CoCo 3" above
+            cmpb      #$FE
+            bne       dwwnoc3b@
+            IFNDEF    ONEROM_TEST_PATTERN ; its body never leaves - nothing
+            lda       #$DF               ; to patch.  Leave = $FFDF (RAM
+            sta       DWWLEAVE1+2-DWWCODE,s ; mode) - see "CoCo 3" above; +2
+            sta       DWWLEAVE2+2-DWWCODE,s ; is the low byte of each STA's
+            ENDC                         ; operand
+dwwnoc3b@   jsr       ,s
             leas      DWWCODELEN,s
             puls      cc,d,u,pc
 
 * Position-independent body - copied onto the stack and run from there.
 * Entered with X/Y as DWWrite's own entry parameters (untouched by the
 * copy loop above), U free to use, and interrupts already masked.
-DWWCODE     ldu       #$C100             ; signalling page - see
+DWWCODE     sta       >$FFDE             ; cartridge in - see "CoCo 3" above
+            ldu       #$C100             ; signalling page - see
                                           ; plugins/user/drivewire: low byte
                                           ; of the effective address of
                                           ; "LDA b,u" IS the value b,
@@ -165,14 +211,19 @@ dwwgiveup@  ldu       #$C100             ; back to the signalling page for
             lda       b,u                ; send high byte of count
             puls      b                  ; restore low byte
             lda       b,u                ; send low byte of count
+DWWLEAVE1   sta       >$FFDE             ; leave - patched to $FFDF on a
+                                          ; CoCo 3 (see "CoCo 3" above), so
+                                          ; the buffer read below sees RAM
 
-dwwloop@    lda       ,x+                ; fetch next data byte
+DWWLOOP     lda       ,x+                ; fetch next data byte
             tfr       a,b
+            sta       >$FFDE             ; cartridge in
             lda       b,u                ; "send" it - address encodes the
                                           ; value, the byte actually read
                                           ; back is unused
+DWWLEAVE2   sta       >$FFDE             ; leave - patched like DWWLEAVE1
             leay      -1,y
-            bne       dwwloop@
+            bne       DWWLOOP
 
             rts
             ENDC
