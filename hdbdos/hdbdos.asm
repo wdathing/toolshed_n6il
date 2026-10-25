@@ -566,7 +566,11 @@ LC109          fcb       20                  20 DISK BASIC 1.1 COMMANDS
 * RAM HOOKS FOR DISK BASIC
 LC113          fdb       DVEC0,DVEC1,DVEC2
 *	FDB	DVEC3,DVEC4,DVEC5
+               IFDEF     ONEROM
+               fdb       DVEC3,DVEC4,DVEC5  ; FlexiKey removed - see below
+               ELSE
                fdb       DVEC3,FLEXKY,DVEC5
+               ENDC
                fdb       DVEC6,DVEC7,DVEC8
                fdb       XVEC9,DVEC10,DVEC11
                fdb       DVEC12,DVEC13,DVEC14
@@ -3969,7 +3973,11 @@ FPGAWiFiLpEnd
 
 ITSOK          jsr       >BEEP               Send a beep
                IFNE      DW-1
+               IFDEF     ONEROM
+               bra       DOAUTO
+               ELSE
                bra       BOOTUP              Try AUTOEXEC
+               ENDC
 
 * From this point floppies are enabled
 FAIL           ldx       #FAILED-1           Point to message
@@ -3977,8 +3985,57 @@ FAIL2          clr       <DCDRV              Insure drive 0 boot
                bsr       PRINT2
                ldb       #$04
                jsr       >DCLOSE
-               ENDC      
+               ENDC
 
+* NOTE: "IFNE DW-1" above is always false for every DW-based ROM this
+* file builds (confirmed empirically: even unconditional code placed
+* directly inside it, outside any nested conditional, never reaches the
+* final binary) - so FAIL/FAIL2 above, and the "bra DOAUTO"/"bra BOOTUP"
+* one-liner above that, are both dead code, reached by nothing.  This
+* predates the ONEROM build variant - not something to fix here, just
+* something the block below has to live outside of, since anything
+* placed inside "IFNE DW-1" is as unreachable as that code already is.
+               IFDEF     ONEROM
+* One ROM always boots the same way, over DriveWire rather than a
+* swappable floppy - skip straight to AUTOEXEC.BAS.  There's no
+* "insert a different disk, hold SHIFT to stop it" scenario the key
+* check below exists for, and no physical drive to sanity-check first
+* either.
+*
+* The ESP32 companion isn't necessarily powered and booted yet by the
+* time the CoCo gets here - e.g. if it's only powered over the
+* DriveWire link itself, rather than its own separate USB supply.
+* DOAUTO's own AUTOEXEC.BAS lookup has no DCSTAT check of its own and
+* lets a failed read raise a raw BASIC "?IO ERROR" instead of falling
+* back quietly, unlike the probe-then-BASICBYE pattern BOOTUP uses for
+* a real floppy below.  Retrying that same probe here, rather than
+* running it once, means an ESP32 that is merely slow to boot gets the
+* time it needs, while one that is genuinely absent (or the bridge
+* unplugged) still falls back to BASIC after a bounded wait, matching
+* BOOTUP's own original intent either way.
+*
+* 20 attempts x an $8000 (LD7F3) delay per attempt are starting values,
+* not measured ones - real ESP32 boot time on this hardware hasn't been
+* timed yet.  ~250ms/attempt (6809 cycle-counted at single-speed, this
+* path runs before any SAM speed-up poke) x 20 gives ~5s total wait.
+               ldy       #20                 Retry budget
+AUTOPRB        ldb       #6                  Move 6 bytes
+               ldx       #DTEST              Read, D=0, T=0, S=1, B=$600
+               ldu       DSKVAR              Point to DSKCON variables
+               jsr       LA59A               Move (B) From X to U
+               ldb       <DCDRV              Get current drive
+               stb       <DCDRV              Store for DSKCON
+               jsr       [DCNVEC]            Try to read disk
+               tst       <DCSTAT             Did we get an I/O error?
+               beq       DOAUTO              No - ESP32's ready, go run AUTOEXEC.BAS
+               leay      -1,Y                One fewer attempt left
+               beq       BASICBYE            Out of attempts - give up quietly, as BOOTUP always did
+               ldx       #$8000              Per-attempt delay loop count - see LD7F3
+               jsr       >LD7F3              Wait a bit before retrying
+               bra       AUTOPRB
+               ENDC
+
+               IFNDEF    ONEROM
 * Test for SHIFT key, skip autoboot if pressed
 BOOTUP         lda       #$7F                Shift bit mask
 * Optimizations below save 1 byte
@@ -4001,6 +4058,7 @@ BOOTUP         lda       #$7F                Shift bit mask
                jsr       [DCNVEC]            Try to read disk
                tst       <DCSTAT             Did we get an I/O error?
                bne       BASICBYE            Yes, just go to BASIC
+               ENDC
 
 * Try to find & run the AUTOEXEC.BAS file
 * If file is MACHINE CODE, do not try to run it!
@@ -4177,14 +4235,22 @@ SETUP          sta       <VCMD               Store command byte
 
 * Exit: X = address of read/write buffer
 SEND           ldy       #5
-SENDY          ldx       #$FFD6              coco 2 normal speed address
+SENDY          IFNDEF    ONEROM
+* Pokes the SAM's CPU speed-up register, timed to what the bit-banger
+* transport's own software loops below assume - $FFD6 (normal) or, on a
+* CoCo3, $FFD9 (double speed).  One ROM's DriveWire bridge has no
+* software-timed signalling of its own to keep in step with, and the
+* real bottleneck is UART1's fixed baud rate to the ESP32, not CPU
+* speed, so none of this applies and ONEROM skips it entirely.
+               ldx       #$FFD6              coco 2 normal speed address
                IFGT      Level-1
                lda       >$FFFC              MSB of NMI vector
                cmpa      #$FE                coco 3 uses FExx page
                bne       SETSPD              branch if not coco 3
                leax      3,x                 coco 3 fast speed address
-               ENDC      
+               ENDC
 SETSPD         sta       ,x                  set speed
+               ENDC
                ldd       <DCBPT              get read/write buffer
                ldx       #256                sector size
                pshs      x,d                 push receive params
@@ -5178,7 +5244,7 @@ NAMBUF         fcc       "AUTOEXEC"          FILENAME
 
 * Main Sign-On Message And Copyright Notice
 
-SIGNON         fcc       "HDB-DOS "
+SIGNON         fcc       "HDBDOS "
                fcb       VMAJOR+$30,$2E,VMINOR+$30
                IFNE      VREV
                fcb       VREV
@@ -5212,7 +5278,7 @@ SIGNON         fcc       "HDB-DOS "
                ENDC      
                IFDEF     DW
                IFDEF     ONEROM
-               fcc       "ONE ROM "
+               fcc       "1ROM "
                ELSE
                IFDEF     ARDUINO
                fcc       "DW3 ARDUINO"
@@ -5281,6 +5347,13 @@ C@             jmp       XVEC3               Console out
 
 * FlexiKey Copyright (C) 1984 by Colin J. Stearman
 * Source code reproduced from Rainbow - October 1984
+*
+* One ROM doesn't need this - it's an interactive-BASIC-session keyboard
+* convenience (recall/edit a previously entered line), irrelevant to a
+* ROM whose job is booting straight into the DriveWire-backed config
+* app - see the vector table above, which points DVEC4 directly back to
+* stock Color BASIC's own keyboard handling for ONEROM builds instead.
+               IFNDEF    ONEROM
 
 FLEXKY         lda       <$6F                Get device number
                beq       KEY                 Go if keyboard
@@ -5384,6 +5457,7 @@ DOMORE         ldb       ,x+                 Get a byte
                stb       ,y+                 Put a byte
                bne       DOMORE              If not end (0) flag get more
                rts                           ALL	Done, return
+               ENDC
 ZZLAST         equ       *-1                 Cannot be > $DFFF!
 
 
